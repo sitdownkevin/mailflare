@@ -1,0 +1,66 @@
+name: Check upstream updates
+
+on:
+  schedule:
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: upstream-update-pr
+  cancel-in-progress: false
+
+jobs:
+  propose-update:
+    if: github.repository == 'sitdownkevin/mailflare'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout or upstream code execution, and no Cloudflare credentials.
+      - name: Open or reuse upstream pull request
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const upstreamOwner = 'hieunc229';
+            const upstreamRepo = 'mailflare';
+            const [{ data: local }, { data: upstream }] = await Promise.all([
+              github.rest.repos.get({ owner, repo }),
+              github.rest.repos.get({ owner: upstreamOwner, repo: upstreamRepo }),
+            ]);
+            const base = local.default_branch;
+            const head = `${upstreamOwner}:${upstream.default_branch}`;
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+              owner, repo, basehead: `${base}...${head}`,
+            });
+            if (comparison.ahead_by === 0) {
+              await core.summary.addRaw('Already up to date with upstream.').write();
+              return;
+            }
+            const { data: open } = await github.rest.pulls.list({
+              owner, repo, state: 'open', base, head,
+            });
+            if (open.length) {
+              await core.summary.addLink('Review existing upstream update', open[0].html_url).write();
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.create({
+              owner, repo, base, head, head_repo: upstreamRepo,
+              title: 'chore: sync upstream Mailflare updates',
+              body: [
+                `Upstream has ${comparison.ahead_by} commit(s) to review.`,
+                '',
+                `Source: https://github.com/${upstreamOwner}/${upstreamRepo}/tree/${upstream.default_branch}`,
+                '',
+                'This PR does not deploy or modify the production database.',
+                'Before merging, review configuration changes and D1 migrations, run validation, and confirm a recent backup.',
+                'Use **Create a merge commit** to retain upstream ancestry. Do not squash or rebase upstream sync PRs.',
+                'The source branch follows upstream main, so later upstream commits will appear in this same PR.',
+                '',
+                'See docs/installation-maintenance.md for deployment and update instructions.',
+              ].join('\n'),
+            });
+            await core.summary.addLink('Review upstream update', pr.html_url).write();
